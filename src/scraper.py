@@ -30,13 +30,11 @@ def detect_mirror(candidates=None, timeout=8):
                 resp = client.get(url, timeout=timeout)
                 if resp.status_code >= 400:
                     continue
-                # Confirm this is actually the comic site by checking for the
-                # search input the scraper depends on.  A domain that is "up"
-                # but serving a parked page, Cloudflare wall, or returning 404
-                # on all paths will not have this element.
-                if 'id="keyword"' not in resp.text and "id='keyword'" not in resp.text:
-                    continue
                 # Parse any 'Backup domain: <a href="...">...' announcement.
+                # Note: a Cloudflare JS-challenge page (HTTP 200) still counts
+                # as reachable — Playwright Firefox will solve the challenge.
+                # The original readcomiconline.li failure was a true HTTP 404,
+                # which is caught by the status check above.
                 extra = []
                 for href in _re.findall(
                     r"[Bb]ackup\s+domain.*?<a\s[^>]*href=[\"']([^\"']+)[\"']",
