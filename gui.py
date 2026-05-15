@@ -89,7 +89,6 @@ QListWidget {
     background-color: #181825;
     border: 1px solid #313244;
     border-radius: 4px;
-    color: #cdd6f4;
     outline: none;
 }
 QListWidget::item {
@@ -601,6 +600,8 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(6, 14, 6, 6)
         self.comics_list = QListWidget()
         self.comics_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.comics_list.setWordWrap(True)
+        self.comics_list.setTextElideMode(Qt.ElideNone)
         ll.addWidget(self.comics_list)
         splitter.addWidget(left_box)
 
@@ -627,6 +628,7 @@ class MainWindow(QMainWindow):
         self.info_label.setTextFormat(Qt.RichText)
         self.info_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.info_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.info_label.setMinimumWidth(1)  # lets the label shrink to container width and wrap
         dvl.addWidget(self.info_label)
         dvl.addStretch()
 
@@ -653,6 +655,8 @@ class MainWindow(QMainWindow):
         rl.addLayout(sel_row)
 
         self.issues_list = QListWidget()
+        self.issues_list.setWordWrap(True)
+        self.issues_list.setTextElideMode(Qt.ElideNone)
         rl.addWidget(self.issues_list)
         splitter.addWidget(right_box)
 
@@ -753,7 +757,9 @@ class MainWindow(QMainWindow):
         self._set_ui_searching(False)
         self._comics = results
         for comic in results:
-            self.comics_list.addItem(comic["title"])
+            item = QListWidgetItem(comic["title"])
+            item.setForeground(QColor("#cdd6f4"))
+            self.comics_list.addItem(item)
         if not results:
             self.statusBar().showMessage("No comics found — try a different query.")
         else:
@@ -813,10 +819,7 @@ class MainWindow(QMainWindow):
         if info.get("genres"):
             lines.append(f"<b>Genres:</b> {html.escape(info['genres'])}")
         if info.get("summary"):
-            s = info["summary"]
-            if len(s) > 350:
-                s = s[:350].rsplit(" ", 1)[0] + "…"
-            lines.append(f"<br><span style='color:#a6adc8;font-size:12px;'>{html.escape(s)}</span>")
+            lines.append(f"<br><span style='color:#a6adc8;font-size:12px;'>{html.escape(info['summary'])}</span>")
         self.info_label.setText("<br>".join(lines))
         self.statusBar().showMessage(f"Loading issues for {title}…")
 
@@ -827,6 +830,7 @@ class MainWindow(QMainWindow):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             item.setData(Qt.UserRole, issue)
+            item.setForeground(QColor("#cdd6f4"))
             self.issues_list.addItem(item)
         n = len(issues)
         self.statusBar().showMessage(f"{n} issue{'s' if n != 1 else ''} available.")
