@@ -5,10 +5,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Setup
 
 ```sh
+fish start.fish               # creates venv, installs deps, installs Firefox, launches GUI
+fish start.fish --verbose     # same but with full output
+fish start.fish --no-headless # show the Firefox window (scraping debug)
+```
+
+Or manually:
+
+```sh
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-playwright install chromium   # one-time browser install
+playwright install firefox    # Firefox required — site blocks Chromium
 ```
 
 ## Running
