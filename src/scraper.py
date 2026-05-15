@@ -7,34 +7,53 @@ import httpx
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 KNOWN_MIRRORS = [
-    "https://readcomiconline.li",
     "https://rcostation.xyz",
+    "https://readcomiconline.li",
 ]
+
+# Browser-like headers so plain httpx requests are not blocked by basic bot filters.
+_PROBE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 
 
 def detect_mirror(candidates=None, timeout=8):
     """
     Probe each candidate URL and return (working_url, extra_mirrors).
 
+    A mirror is accepted when the homepage response meets at least one of:
+      - Contains id="keyword"  →  real site loaded (no Cloudflare in front)
+      - Contains /cdn-cgi/     →  Cloudflare challenge page; Playwright will
+                                  solve it, so the mirror is still usable
+    Plain HTTP 4xx/5xx and connection errors are always rejected.
+    A 200 response with neither marker (parked domain, generic error page)
+    is also rejected — that was the readcomiconline.li failure mode.
+
     extra_mirrors: additional URLs found in the site's 'Backup domain'
-    announcement inside <div id="leftside">.  Returns (None, []) when
-    every candidate fails or times out.
+    announcement.  Returns (None, []) when no candidate passes.
     """
     if candidates is None:
         candidates = list(KNOWN_MIRRORS)
 
-    client = httpx.Client(timeout=timeout, follow_redirects=True)
+    client = httpx.Client(
+        timeout=timeout, follow_redirects=True, headers=_PROBE_HEADERS
+    )
     try:
         for url in candidates:
             try:
                 resp = client.get(url, timeout=timeout)
                 if resp.status_code >= 400:
                     continue
+                text = resp.text
+                has_search_form = 'id="keyword"' in text or "id='keyword'" in text
+                is_cf_challenge = "/cdn-cgi/" in text  # Cloudflare-specific path
+                if not has_search_form and not is_cf_challenge:
+                    continue  # parked / broken domain returning 200
                 # Parse any 'Backup domain: <a href="...">...' announcement.
-                # Note: a Cloudflare JS-challenge page (HTTP 200) still counts
-                # as reachable — Playwright Firefox will solve the challenge.
-                # The original readcomiconline.li failure was a true HTTP 404,
-                # which is caught by the status check above.
                 extra = []
                 for href in _re.findall(
                     r"[Bb]ackup\s+domain.*?<a\s[^>]*href=[\"']([^\"']+)[\"']",
