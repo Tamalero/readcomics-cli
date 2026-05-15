@@ -585,7 +585,7 @@ class MainWindow(QMainWindow):
         search_row.addWidget(self.mirror_combo)
         self.mirror_btn = QPushButton("⟳")
         self.mirror_btn.setObjectName("secondary")
-        self.mirror_btn.setFixedWidth(32)
+        self.mirror_btn.setFixedWidth(42)
         self.mirror_btn.setToolTip("Re-detect available mirrors")
         search_row.addWidget(self.mirror_btn)
 
