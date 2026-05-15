@@ -16,15 +16,17 @@ Or manually:
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-playwright install firefox    # Firefox required — site blocks Chromium
+playwright install firefox    # Firefox required — site blocks all Chromium variants
 ```
 
 ## Running
 
 ```sh
 python gui.py                           # PySide6 GUI (primary)
+python gui.py --verbose                 # debug logging to stderr + log file
+python gui.py --no-headless             # show the Firefox browser window
 
-python main.py                          # interactive TUI (CLI fallback)
+python main.py                          # interactive Rich TUI (CLI fallback)
 python main.py -s "Batman"              # skip search prompt
 python main.py -o ~/Comics              # custom download directory
 python main.py --no-headless            # show browser (debug scraping)
@@ -32,34 +34,160 @@ python main.py --no-headless            # show browser (debug scraping)
 
 There are no tests or linting configuration in this project.
 
+## Current version
+
+Tracked in `VERSION` file. Read at runtime by `gui.py::_read_version()`. Current: **1.1.1**.
+
 ## Architecture
 
-The codebase has three layers:
+The codebase has three layers plus a standalone scraper module.
 
-**GUI — `gui.py`**
-PySide6 (Qt6) application with a dark Catppuccin Mocha theme. Three-panel layout: comics search results list | comic details (cover + metadata) | issues list with per-item checkboxes. All network operations run in `QThread` subclasses (`SearchWorker`, `ComicDetailWorker`, `DownloadWorker`) and communicate back via Qt signals. The `ComicDetailWorker` sets a `_cancelled` flag and disconnects its signals when superseded by a new selection, so stale results from slow Playwright calls are discarded rather than applied to the UI.
+---
 
-Output formats are selected via a combo box: **Folder** (raw images), **CBZ** (zip renamed to `.cbz`, Python-native via `zipfile`), or **CBR** (rar archive via the `rar` binary — warns the user if not found). After packaging, the intermediate image folder is removed.
+### `gui.py` — PySide6 GUI (primary entry point)
 
-**TUI/CLI layer — `main.py`**
-All user interaction, display, and orchestration lives here. Uses Rich for tables, panels, progress bars, and spinners. Registers `atexit` and `SIGINT`/`SIGTERM` handlers that call `scraper.close()` to ensure the Playwright browser is always released. The main loop is: search → pick comic → pick issues → download, with `q` at any step looping back.
+Dark Catppuccin Mocha theme. Layout: search bar row | three-panel QSplitter (Comics list | Details | Issues list) | bottom control bar.
 
-**Scraper/network layer — `src/scraper.py`**
-`ComicScraper` handles all I/O. It holds two clients:
-- A **lazy Playwright browser** (`self._browser`, only instantiated on first use) for pages that require JavaScript execution (readcomiconline.li is behind Cloudflare).
-- An **`httpx.Client`** (`self._http`) for concurrent image downloads and cover art fetches.
+**Search bar row:** search input + Search button + vertical separator + Mirror combo + ⟳ refresh button (42 px wide).
 
-Each scraper method (`search`, `get_comic_info`, `get_issues`, `get_issue_image_urls`) opens a fresh Playwright page, navigates, evaluates JavaScript to extract data, then closes the page. The browser itself is reused across calls.
+**Three panels:**
+- **Comics** — `QListWidget` of search results. Items coloured `#a6e3a1` (green) when status is *Ongoing*, `#cdd6f4` otherwise. Colour applied lazily in `_on_info_ready` as details load.
+- **Details** — scrollable cover `QPixmap` + metadata HTML (`QLabel` with `Qt.RichText`). All scraped values passed through `html.escape()` before embedding.
+- **Issues** — `QListWidget` with `Qt.ItemIsUserCheckable` checkboxes, Select All / None buttons.
 
-For issue pages, `get_issue_image_urls` appends `?readType=1` to load all pages at once, then uses an in-page JS scroll loop to trigger lazy-loaded images before collecting URLs.
+**Bottom bar:** `Save as:` QCheckBox + CBZ/CBR QComboBox | `Delay:` QDoubleSpinBox (0–30 s, step 0.5) | Output QLineEdit + Browse | Download / Cancel buttons | QProgressBar | QTextEdit log (read-only, max height 90 px).
 
-Downloads use `ThreadPoolExecutor(max_workers=6)`. The GUI's `DownloadWorker` calls `scraper._download_single_page` directly and emits `progress_update` signals; `main.py` drives its own Rich progress bar via `_download_with_progress`.
+**Workers (all `QThread` subclasses):**
+- `SearchWorker` — calls `scraper.search(query)`
+- `ComicDetailWorker` — calls `scraper.get_comic_info()` then `scraper.get_issues()` sequentially; cancellable via `_cancelled` flag + signal disconnect
+- `DownloadWorker` — fetches image URLs then downloads pages; concurrent (`ThreadPoolExecutor(max_workers=6)`) when delay = 0, sequential with `random.uniform(delay×0.5, delay×1.5)` jitter when delay > 0
+- `UpdateCheckWorker` — silently queries GitHub releases API at startup via `urllib.request`; emits `update_available(latest_version, url)` if newer tag found; all exceptions suppressed
+- `MirrorCheckWorker` — calls `detect_mirror()` at startup and on ⟳ click; emits `mirror_found(active_url, all_mirrors)` or `mirror_failed()`
 
-**Image rendering — `src/terminal_image.py`**
-Used only by the CLI. Renders JPEG/PNG images as ANSI half-block characters (▄) using 24-bit truecolor: background = top pixel, foreground = bottom pixel, giving 2 vertical pixels per character cell. The GUI displays cover art as a native `QPixmap` instead.
+**Critical threading rule:** Every `QThread.run()` calls `self._scraper.reset_browser()` as its first line. Qt recycles OS thread IDs across QThread instances, so the old thread-ID tracking was unreliable. `reset_browser()` guarantees a clean Playwright greenlet for each worker.
+
+**Logging:** `_setup_logging(verbose)` writes to `$XDG_STATE_HOME/readcomics/readcomics.log` (always) and optionally stderr. XDG path is writable even from a read-only AppImage mount.
+
+**Version + update check constants:**
+```python
+__version__ = _read_version()          # reads VERSION file
+_GITHUB_REPO = "Tamalero/readcomics-cli"
+_RELEASES_API = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+```
+
+---
+
+### `main.py` — Rich TUI (CLI fallback)
+
+Search → pick comic → pick issues → download loop. Registers `atexit` and `SIGINT`/`SIGTERM` handlers calling `scraper.close()`. Includes `_safe_dirname()` for path-traversal protection identical to `gui.py`.
+
+---
+
+### `src/scraper.py` — `ComicScraper` + helpers
+
+**Module-level:**
+```python
+KNOWN_MIRRORS = [
+    "https://readcomiconline.li",
+    "https://rcostation.xyz",
+]
+```
+
+**`detect_mirror(candidates=None, timeout=8)`** — standalone function (not a method). Creates its own `httpx.Client`. For each candidate URL:
+1. GET homepage; skip if status ≥ 400.
+2. Skip if `id="keyword"` absent from response body — a domain can return HTTP 200 while serving 404 on all comic paths (`readcomiconline.li` was exactly this case).
+3. On first passing candidate, regex-scan HTML for `Backup domain … <a href="...">` to discover additional mirrors.
+Returns `(working_url, extra_mirrors)` or `(None, [])`.
+
+**Browser:** Playwright **Firefox** (not Chromium — site detects and 404s all Chromium variants).
+
+**State per instance:**
+```
+_playwright, _browser, _browser_tid, _browser_lock   # browser lifecycle
+_ctx, _ctx_tid, _ctx_lock                            # shared session context (per thread)
+_http                                                # httpx.Client (thread-safe, never reset)
+```
+
+**`_session_ctx` property:** Returns one `BrowserContext` per thread so cookies/session persist across homepage → comic detail → issues page within a single worker.
+
+**`reset_browser()`:** Tears down `_ctx`, `_browser`, `_playwright`, resets all tid flags. Called at the top of every `QThread.run()`.
+
+**`get_comic_info` year field:** Matches `"year of release"`, `"publication"`, and `"publication date"` (lowercased label text) — the site uses all three across different comic pages.
+
+**`get_issues` filter:**
+```python
+path.lower().startswith(f"/comic/{slug.lower()}/") and path != comic_path
+```
+
+**`get_issue_image_urls`:** Appends `?readType=1`, then JS scroll loop (up to 15 s) to trigger lazy-loaded images.
+
+---
+
+### `src/terminal_image.py` — CLI-only image renderer
+
+Renders images as ANSI half-block characters (▄) with 24-bit truecolor. Not used by the GUI (which renders cover art as `QPixmap`).
+
+---
+
+## Security patterns
+
+**`_safe_dirname(name)`** (in both `gui.py` and `main.py`):
+```python
+def _safe_dirname(name: str) -> str:
+    name = re.sub(r'[/\\:*?"<>|]', '_', name)
+    name = re.sub(r'\.\.+', '.', name)
+    name = name.strip('. ')
+    return name or "Unknown"
+```
+Applied to URL-derived `comic_name` (URL path part 2) and `safe_title` (issue title) before using them as directory names.
+
+**HTML escaping:** All scraped values rendered in `QLabel` rich text go through `html.escape()`.
+
+**Subprocess safety:** `_package_cbr` passes `["rar", "a", "-ep", "--", out_path] + images` — the `--` prevents filenames starting with `-` being misread as flags.
+
+---
 
 ## Key data shapes
 
-- Search result / issue: `{"title": str, "url": str, "thumbnail": str}`
+- Search result: `{"title": str, "url": str, "thumbnail": str}`
 - Comic info: `{"cover": str, "summary": str, "genres": str, "status": str, "year": str, "publisher": str}`
-- Downloads saved to: `<output_dir>/<comic-title>/<issue-title>/<001.jpg ...>`
+- Issue: `{"title": str, "url": str}`
+- Download layout: `<output_dir>/<_safe_dirname(comic-slug)>/<_safe_dirname(issue-title)>/<001.jpg …>`
+- CBZ = Python `zipfile` renamed to `.cbz`; CBR = `rar` binary required
+
+---
+
+## AppImage
+
+Built by `build-appimage.sh`. Bundles Python 3.12.13 (python-build-standalone stripped), PySide6, Playwright, Firefox, httpx, rich, Pillow. Output: `ReadComics-x86_64.AppImage` (~387 MB). Python archive cached in `appimage-build/cache/` for re-runs.
+
+**`AppRun` environment variables:**
+```bash
+PLAYWRIGHT_BROWSERS_PATH="$HERE/opt/readcomics/pw-browsers"
+PYTHONHOME="$HERE/opt/readcomics/python"
+PYTHONPATH="$HERE/opt/readcomics"
+QT_QPA_PLATFORM_PLUGIN_PATH="$SITE/PySide6/Qt/plugins/platforms"
+LD_LIBRARY_PATH="$SITE/PySide6/Qt/lib:$HERE/opt/readcomics/python/lib:..."
+APPDIR="$HERE"
+```
+
+**Update information embedded:** `gh-releases-zsync|Tamalero|readcomics-cli|latest|ReadComics-x86_64.AppImage.zsync`
+
+**appimagetool flag:** `--updateinformation` (not `--update-information` — the hyphenated form is rejected).
+
+---
+
+## Release process
+
+```sh
+# 1. Bump VERSION file
+# 2. Commit + push
+git add VERSION && git commit -m "chore: bump version to X.Y.Z" && git push origin master
+# 3. Build AppImage
+bash build-appimage.sh
+# 4. Tag + push tag
+git tag vX.Y.Z && git push origin vX.Y.Z
+# 5. Create GitHub release with artifacts
+gh release create vX.Y.Z ReadComics-x86_64.AppImage ReadComics-x86_64.AppImage.zsync \
+  --title "ReadComics vX.Y.Z" --notes "..."
+```
