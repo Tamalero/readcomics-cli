@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QFrame, QCheckBox, QDoubleSpinBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QPixmap, QFont
+from PySide6.QtGui import QPixmap, QFont, QColor
 
 from src.scraper import ComicScraper, KNOWN_MIRRORS, detect_mirror
 
@@ -785,6 +785,17 @@ class MainWindow(QMainWindow):
     def _on_info_ready(self, info: dict, cover_data: bytes):
         if not self._current_comic:
             return
+
+        # Color the comic list entry green when the comic is ongoing.
+        row = self.comics_list.currentRow()
+        if row >= 0:
+            item = self.comics_list.item(row)
+            if item:
+                if "ongoing" in info.get("status", "").lower():
+                    item.setForeground(QColor("#a6e3a1"))  # Catppuccin green
+                else:
+                    item.setForeground(QColor("#cdd6f4"))  # default text colour
+
         if cover_data:
             pm = QPixmap()
             pm.loadFromData(cover_data)

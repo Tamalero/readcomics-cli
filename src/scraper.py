@@ -261,7 +261,8 @@ class ComicScraper:
                             val = val.split('\\n')[0].replace(/\\u00a0/g, ' ').trim();
 
                             if (key === 'status')           result.status = val;
-                            if (key === 'year of release')  result.year = val;
+                            if (key === 'year of release' || key === 'publication' || key === 'publication date')
+                                result.year = val;
                             if (key === 'publisher')        result.publisher = val;
                         }
                     }
