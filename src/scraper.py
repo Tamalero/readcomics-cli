@@ -1,9 +1,53 @@
 import os
+import re as _re
 import threading
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
+KNOWN_MIRRORS = [
+    "https://readcomiconline.li",
+    "https://rcostation.xyz",
+]
+
+
+def detect_mirror(candidates=None, timeout=8):
+    """
+    Probe each candidate URL and return (working_url, extra_mirrors).
+
+    extra_mirrors: additional URLs found in the site's 'Backup domain'
+    announcement inside <div id="leftside">.  Returns (None, []) when
+    every candidate fails or times out.
+    """
+    if candidates is None:
+        candidates = list(KNOWN_MIRRORS)
+
+    client = httpx.Client(timeout=timeout, follow_redirects=True)
+    try:
+        for url in candidates:
+            try:
+                resp = client.get(url, timeout=timeout)
+                if resp.status_code >= 400:
+                    continue
+                # Parse any 'Backup domain: <a href="...">...' announcement.
+                extra = []
+                for href in _re.findall(
+                    r"[Bb]ackup\s+domain.*?<a\s[^>]*href=[\"']([^\"']+)[\"']",
+                    resp.text,
+                    _re.DOTALL,
+                ):
+                    parsed = urlparse(href)
+                    if parsed.scheme in ("http", "https") and parsed.netloc:
+                        base = f"{parsed.scheme}://{parsed.netloc}"
+                        if base not in candidates and base not in extra:
+                            extra.append(base)
+                return url, extra
+            except Exception:
+                continue
+        return None, []
+    finally:
+        client.close()
 
 
 class ComicScraper:

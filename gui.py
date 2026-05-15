@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap, QFont
 
-from src.scraper import ComicScraper
+from src.scraper import ComicScraper, KNOWN_MIRRORS, detect_mirror
 
 logger = logging.getLogger("readcomics")
 
@@ -456,6 +456,33 @@ def _version_gt(a: str, b: str) -> bool:
     return _parts(a) > _parts(b)
 
 
+# ── Mirror checker ────────────────────────────────────────────────────────────
+
+class MirrorCheckWorker(QThread):
+    """Probes candidate mirrors and emits the first reachable one."""
+    mirror_found = Signal(str, list)   # active_url, all_mirrors (including newly discovered)
+    mirror_failed = Signal()
+
+    def __init__(self, candidates: list):
+        super().__init__()
+        self._candidates = list(candidates)
+
+    def run(self):
+        try:
+            active, extra = detect_mirror(self._candidates)
+            if active:
+                all_mirrors = list(self._candidates)
+                for m in extra:
+                    if m not in all_mirrors:
+                        all_mirrors.append(m)
+                self.mirror_found.emit(active, all_mirrors)
+            else:
+                self.mirror_failed.emit()
+        except Exception:
+            logger.exception("Mirror detection failed")
+            self.mirror_failed.emit()
+
+
 # ── Path helpers ──────────────────────────────────────────────────────────────
 
 def _safe_dirname(name: str) -> str:
@@ -511,12 +538,14 @@ class MainWindow(QMainWindow):
         self._detail_worker: ComicDetailWorker | None = None
         self._download_worker: DownloadWorker | None = None
         self._update_worker: UpdateCheckWorker | None = None
+        self._mirror_worker: MirrorCheckWorker | None = None
         self._comics: list = []
         self._current_comic: dict | None = None
 
         self._build_ui()
         self._connect_signals()
         self._start_update_check()
+        self._start_mirror_check()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -535,6 +564,31 @@ class MainWindow(QMainWindow):
         self.search_btn.setFixedWidth(90)
         search_row.addWidget(self.search_input)
         search_row.addWidget(self.search_btn)
+
+        # Mirror selector
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        sep.setStyleSheet("color: #313244;")
+        search_row.addSpacing(4)
+        search_row.addWidget(sep)
+        search_row.addSpacing(4)
+        search_row.addWidget(QLabel("Mirror:"))
+        self.mirror_combo = QComboBox()
+        self.mirror_combo.addItems(KNOWN_MIRRORS)
+        self.mirror_combo.setCurrentText(KNOWN_MIRRORS[-1])
+        self.mirror_combo.setMinimumWidth(210)
+        self.mirror_combo.setToolTip(
+            "Active mirror — the app probes both on startup and uses the first reachable one.\n"
+            "Change manually if the auto-detected mirror is slow or broken."
+        )
+        search_row.addWidget(self.mirror_combo)
+        self.mirror_btn = QPushButton("⟳")
+        self.mirror_btn.setObjectName("secondary")
+        self.mirror_btn.setFixedWidth(32)
+        self.mirror_btn.setToolTip("Re-detect available mirrors")
+        search_row.addWidget(self.mirror_btn)
+
         root.addLayout(search_row)
 
         # Three-panel splitter
@@ -667,6 +721,8 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self.search_btn.clicked.connect(self._do_search)
         self.search_input.returnPressed.connect(self._do_search)
+        self.mirror_combo.currentTextChanged.connect(self._on_mirror_changed)
+        self.mirror_btn.clicked.connect(self._start_mirror_check)
         self.comics_list.currentRowChanged.connect(self._on_comic_selected)
         self.sel_all_btn.clicked.connect(self._select_all)
         self.sel_none_btn.clicked.connect(self._select_none)
@@ -892,6 +948,44 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Update available: v{latest} — visit {url}"
         )
+
+    # ── Mirror detection ──────────────────────────────────────────────────────
+
+    def _start_mirror_check(self):
+        candidates = [self.mirror_combo.itemText(i) for i in range(self.mirror_combo.count())]
+        self.mirror_btn.setEnabled(False)
+        self.statusBar().showMessage("Checking mirrors…")
+        self._mirror_worker = MirrorCheckWorker(candidates)
+        self._mirror_worker.mirror_found.connect(self._on_mirror_found)
+        self._mirror_worker.mirror_failed.connect(self._on_mirror_failed)
+        self._mirror_worker.start()
+
+    def _on_mirror_found(self, active: str, all_mirrors: list):
+        self.mirror_btn.setEnabled(True)
+        existing = {self.mirror_combo.itemText(i) for i in range(self.mirror_combo.count())}
+        for m in all_mirrors:
+            if m not in existing:
+                self.mirror_combo.addItem(m)
+        # Apply without firing _on_mirror_changed (which would show a redundant message)
+        self.mirror_combo.blockSignals(True)
+        self.mirror_combo.setCurrentText(active)
+        self.mirror_combo.blockSignals(False)
+        self._scraper.base_url = active
+        self.statusBar().showMessage(f"Mirror: {active}")
+        logger.debug("Active mirror: %s", active)
+
+    def _on_mirror_failed(self):
+        self.mirror_btn.setEnabled(True)
+        self.statusBar().showMessage(
+            "No mirror reachable — check your connection or select a mirror manually."
+        )
+        logger.warning("All mirrors unreachable")
+
+    def _on_mirror_changed(self, url: str):
+        if url:
+            self._scraper.base_url = url
+            self.statusBar().showMessage(f"Mirror set to: {url}")
+            logger.debug("Mirror changed to: %s", url)
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
 
