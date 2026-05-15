@@ -2,7 +2,10 @@
 """ReadComics GUI — PySide6 frontend for browsing and downloading comics."""
 
 import argparse
+import base64
+import hashlib
 import html
+import json
 import logging
 import os
 import random
@@ -502,6 +505,46 @@ def _safe_dirname(name: str) -> str:
     return name or "Unknown"
 
 
+# ── Comic detail cache ────────────────────────────────────────────────────────
+
+def _cache_dir() -> Path:
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache_home / "readcomics" / "comic_cache"
+
+
+def _cache_key(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
+def _cache_load(url: str) -> dict | None:
+    path = _cache_dir() / f"{_cache_key(url)}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        logger.exception("Cache load failed for %s", url)
+        return None
+
+
+def _cache_save(url: str, info: dict, cover_data: bytes, issues: list) -> None:
+    d = _cache_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{_cache_key(url)}.json"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "url": url,
+                "info": info,
+                "cover_b64": base64.b64encode(cover_data).decode("ascii") if cover_data else "",
+                "issues": issues,
+                "cached_at": time.time(),
+            }, f, ensure_ascii=False)
+    except Exception:
+        logger.exception("Cache save failed for %s", url)
+
+
 # ── Packaging helpers ─────────────────────────────────────────────────────────
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
@@ -551,6 +594,10 @@ class MainWindow(QMainWindow):
         self._mirror_worker: MirrorCheckWorker | None = None
         self._comics: list = []
         self._current_comic: dict | None = None
+        self._pending_info: dict | None = None
+        self._pending_cover: bytes = b""
+        self._pending_comic_url: str = ""
+        self._skip_cache_save: bool = False
 
         self._build_ui()
         self._connect_signals()
@@ -609,6 +656,21 @@ class MainWindow(QMainWindow):
         left_box = QGroupBox("Comics")
         ll = QVBoxLayout(left_box)
         ll.setContentsMargins(6, 14, 6, 6)
+        ll.setSpacing(4)
+
+        sort_row = QHBoxLayout()
+        sort_row.addWidget(QLabel("Sort:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["Year ↓", "Year ↑", "Name", "Status"])
+        self.sort_combo.setFixedWidth(110)
+        self.sort_combo.setToolTip(
+            "Sort order for search results\n"
+            "Year ↓ = newest first  |  Year ↑ = oldest first"
+        )
+        sort_row.addWidget(self.sort_combo)
+        sort_row.addStretch()
+        ll.addLayout(sort_row)
+
         self.comics_list = QListWidget()
         self.comics_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.comics_list.setWordWrap(True)
@@ -620,6 +682,16 @@ class MainWindow(QMainWindow):
         mid_box = QGroupBox("Details")
         ml = QVBoxLayout(mid_box)
         ml.setContentsMargins(6, 14, 6, 6)
+        ml.setSpacing(4)
+
+        cache_row = QHBoxLayout()
+        cache_row.addStretch()
+        self.clear_cache_btn = QPushButton("Clear Cache")
+        self.clear_cache_btn.setObjectName("secondary")
+        self.clear_cache_btn.setFixedWidth(100)
+        self.clear_cache_btn.setToolTip("Delete all locally cached comic details and issue lists")
+        cache_row.addWidget(self.clear_cache_btn)
+        ml.addLayout(cache_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -738,6 +810,8 @@ class MainWindow(QMainWindow):
         self.search_input.returnPressed.connect(self._do_search)
         self.mirror_combo.currentTextChanged.connect(self._on_mirror_changed)
         self.mirror_btn.clicked.connect(self._start_mirror_check)
+        self.sort_combo.currentTextChanged.connect(self._apply_sort)
+        self.clear_cache_btn.clicked.connect(self._clear_cache)
         self.comics_list.currentRowChanged.connect(self._on_comic_selected)
         self.sel_all_btn.clicked.connect(self._select_all)
         self.sel_none_btn.clicked.connect(self._select_none)
@@ -767,14 +841,62 @@ class MainWindow(QMainWindow):
     def _on_search_done(self, results: list):
         self._set_ui_searching(False)
         self._comics = results
-        for comic in results:
-            item = QListWidgetItem(comic["title"])
-            item.setForeground(QColor("#cdd6f4"))
-            self.comics_list.addItem(item)
+        self._apply_sort()
         if not results:
             self.statusBar().showMessage("No comics found — try a different query.")
         else:
             self.statusBar().showMessage(f"Found {len(results)} comic(s).")
+
+    def _apply_sort(self, _ignored=None):
+        """Sort self._comics per the current sort_combo selection and rebuild the list."""
+        if not self._comics:
+            return
+        prev_url = self._current_comic.get("url") if self._current_comic else None
+
+        sort_key = self.sort_combo.currentText()
+
+        def year_key(comic):
+            year_str = comic.get("publication_hint", "")
+            if not year_str:
+                cached = _cache_load(comic["url"])
+                if cached:
+                    year_str = cached.get("info", {}).get("year", "")
+            m = re.search(r'\b(19|20)\d{2}\b', year_str)
+            return int(m.group()) if m else 0
+
+        def status_key(comic):
+            status = comic.get("status_hint", "")
+            if not status:
+                cached = _cache_load(comic["url"])
+                if cached:
+                    status = cached.get("info", {}).get("status", "")
+            return status.lower()
+
+        if sort_key == "Year ↓":
+            self._comics.sort(key=year_key, reverse=True)
+        elif sort_key == "Year ↑":
+            self._comics.sort(key=year_key)
+        elif sort_key == "Name":
+            self._comics.sort(key=lambda c: c["title"].lower())
+        elif sort_key == "Status":
+            self._comics.sort(key=status_key)
+
+        self.comics_list.blockSignals(True)
+        self.comics_list.clear()
+        new_sel_row = -1
+        for i, comic in enumerate(self._comics):
+            item = QListWidgetItem(comic["title"])
+            if "ongoing" in comic.get("status_hint", "").lower():
+                item.setForeground(QColor("#a6e3a1"))
+            else:
+                item.setForeground(QColor("#cdd6f4"))
+            self._set_item_tooltip(item, comic)
+            self.comics_list.addItem(item)
+            if comic["url"] == prev_url:
+                new_sel_row = i
+        if new_sel_row >= 0:
+            self.comics_list.setCurrentRow(new_sel_row)
+        self.comics_list.blockSignals(False)
 
     def _on_search_error(self, msg: str):
         self._set_ui_searching(False)
@@ -790,8 +912,23 @@ class MainWindow(QMainWindow):
         self.issues_list.clear()
         comic = self._comics[row]
         self._current_comic = comic
-        self.statusBar().showMessage(f"Loading: {comic['title']}…")
 
+        cached = _cache_load(comic["url"])
+        if cached:
+            info = cached.get("info", {})
+            cover_b64 = cached.get("cover_b64", "")
+            cover_data = base64.b64decode(cover_b64) if cover_b64 else b""
+            issues = cached.get("issues", [])
+            self._skip_cache_save = True
+            self._on_info_ready(info, cover_data)
+            self._on_issues_ready(issues)
+            self._skip_cache_save = False
+            self._pending_info = None
+            self._pending_cover = b""
+            self._pending_comic_url = ""
+            return
+
+        self.statusBar().showMessage(f"Loading: {comic['title']}…")
         worker = ComicDetailWorker(comic, headless=self._headless)
         self._detail_worker = worker
         worker.info_ready.connect(self._on_info_ready)
@@ -833,6 +970,13 @@ class MainWindow(QMainWindow):
             lines.append(f"<br><span style='color:#a6adc8;font-size:12px;'>{html.escape(info['summary'])}</span>")
         self.info_label.setText("<br>".join(lines))
         self.statusBar().showMessage(f"Loading issues for {title}…")
+        self._pending_info = info
+        self._pending_cover = cover_data
+        self._pending_comic_url = self._current_comic.get("url", "")
+        if row >= 0 and row < len(self._comics):
+            item = self.comics_list.item(row)
+            if item:
+                self._update_item_tooltip(item, self._comics[row]["title"], info)
 
     def _on_issues_ready(self, issues: list):
         self.issues_list.clear()
@@ -845,6 +989,16 @@ class MainWindow(QMainWindow):
             self.issues_list.addItem(item)
         n = len(issues)
         self.statusBar().showMessage(f"{n} issue{'s' if n != 1 else ''} available.")
+        row = self.comics_list.currentRow()
+        if row >= 0 and row < len(self._comics):
+            item = self.comics_list.item(row)
+            if item and self._pending_info is not None:
+                self._update_item_tooltip(item, self._comics[row]["title"], self._pending_info, n)
+        if not self._skip_cache_save and self._pending_info is not None and self._pending_comic_url:
+            _cache_save(self._pending_comic_url, self._pending_info, self._pending_cover, issues)
+            self._pending_info = None
+            self._pending_cover = b""
+            self._pending_comic_url = ""
 
     def _on_detail_error(self, msg: str):
         self.statusBar().showMessage(f"Error loading comic: {msg}")
@@ -952,15 +1106,69 @@ class MainWindow(QMainWindow):
         self.info_label.setText("Select a comic to view details.")
         self._current_comic = None
 
+    def _update_item_tooltip(self, item: QListWidgetItem, title: str, info: dict, n_issues: int = 0) -> None:
+        parts = [f"<b>{html.escape(title)}</b>"]
+        if info.get("status"):
+            parts.append(f"Status: {html.escape(info['status'])}")
+        if info.get("year"):
+            parts.append(f"Year: {html.escape(info['year'])}")
+        if info.get("genres"):
+            parts.append(f"Genres: {html.escape(info['genres'])}")
+        if n_issues:
+            parts.append(f"Issues: {n_issues}")
+        item.setToolTip("<br>".join(parts))
+
+    def _set_item_tooltip(self, item: QListWidgetItem, comic: dict) -> None:
+        cached = _cache_load(comic["url"])
+        if cached:
+            info = cached.get("info", {})
+            n = len(cached.get("issues", []))
+            self._update_item_tooltip(item, comic["title"], info, n)
+        else:
+            # Use hints extracted directly from the search-page tooltip HTML.
+            parts = [f"<b>{html.escape(comic['title'])}</b>"]
+            if comic.get("status_hint"):
+                parts.append(f"Status: {html.escape(comic['status_hint'])}")
+            if comic.get("publication_hint"):
+                parts.append(f"Publication: {html.escape(comic['publication_hint'])}")
+            if comic.get("summary_hint"):
+                summary = comic["summary_hint"]
+                if len(summary) > 200:
+                    summary = summary[:200] + "…"
+                parts.append(f"<i>{html.escape(summary)}</i>")
+            item.setToolTip("<br>".join(parts))
+
+    def _clear_cache(self) -> None:
+        d = _cache_dir()
+        n = len(list(d.glob("*.json"))) if d.exists() else 0
+        if n == 0:
+            self.statusBar().showMessage("Cache is already empty.")
+            return
+        reply = QMessageBox.question(
+            self, "Clear Cache",
+            f"Delete cached details for {n} comic{'s' if n != 1 else ''}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            shutil.rmtree(d, ignore_errors=True)
+            self.statusBar().showMessage(f"Cleared cache ({n} comic{'s' if n != 1 else ''} removed).")
+
     def _abort_detail_worker(self):
-        if self._detail_worker and self._detail_worker.isRunning():
+        if self._detail_worker is None:
+            return
+        if self._detail_worker.isRunning():
             self._detail_worker.cancel()
-            # Disconnect to discard any stale results from the old worker
+        # Always disconnect specific slots — avoids both double-callbacks on the next
+        # load and the PySide6 RuntimeWarning from calling disconnect() with no args.
+        for sig, slot in (
+            (self._detail_worker.info_ready,   self._on_info_ready),
+            (self._detail_worker.issues_ready, self._on_issues_ready),
+            (self._detail_worker.error,        self._on_detail_error),
+        ):
             try:
-                self._detail_worker.info_ready.disconnect()
-                self._detail_worker.issues_ready.disconnect()
-                self._detail_worker.error.disconnect()
-            except RuntimeError:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
                 pass
 
     # ── Update check ──────────────────────────────────────────────────────────
@@ -1017,6 +1225,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._abort_detail_worker()
+        if self._detail_worker and self._detail_worker.isRunning():
+            self._detail_worker.wait(2000)
         if self._download_worker and self._download_worker.isRunning():
             self._download_worker.cancel()
             self._download_worker.quit()

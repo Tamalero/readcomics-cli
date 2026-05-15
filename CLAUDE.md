@@ -36,7 +36,7 @@ There are no tests or linting configuration in this project.
 
 ## Current version
 
-Tracked in `VERSION` file. Read at runtime by `gui.py::_read_version()`. Current: **1.1.1**.
+Tracked in `VERSION` file. Read at runtime by `gui.py::_read_version()`. Current: **1.2.0**.
 
 ## Architecture
 
@@ -51,8 +51,8 @@ Dark Catppuccin Mocha theme. Layout: search bar row | three-panel QSplitter (Com
 **Search bar row:** search input + Search button + vertical separator + Mirror combo + ⟳ refresh button (42 px wide).
 
 **Three panels:**
-- **Comics** — `QListWidget` of search results. Items coloured `#a6e3a1` (green) when status is *Ongoing*, `#cdd6f4` otherwise. Colour applied lazily in `_on_info_ready` as details load.
-- **Details** — scrollable cover `QPixmap` + metadata HTML (`QLabel` with `Qt.RichText`). All scraped values passed through `html.escape()` before embedding.
+- **Comics** — `QListWidget` of search results. Items coloured `#a6e3a1` (green) when status is *Ongoing*, `#cdd6f4` otherwise. Colour is applied immediately at search time from `status_hint` (scraped from the search-page tooltip), not lazily. A `Sort:` QComboBox above the list lets the user order results by **Year ↓** (default, newest first), **Year ↑**, **Name**, or **Status**. `_apply_sort()` sorts `self._comics` in place and rebuilds the list; it also preserves the current selection when re-sorting.
+- **Details** — scrollable cover `QPixmap` + metadata HTML (`QLabel` with `Qt.RichText`). All scraped values passed through `html.escape()`. A **Clear Cache** button (secondary style) sits above the scroll area — shows count confirmation dialog before deleting `$XDG_CACHE_HOME/readcomics/comic_cache/`.
 - **Issues** — `QListWidget` with `Qt.ItemIsUserCheckable` checkboxes, Select All / None buttons.
 
 **Bottom bar:** `Save as:` QCheckBox + CBZ/CBR QComboBox | `Delay:` QDoubleSpinBox (0–30 s, step 0.5) | Output QLineEdit + Browse | Download / Cancel buttons | QProgressBar | QTextEdit log (read-only, max height 90 px).
@@ -65,6 +65,12 @@ Dark Catppuccin Mocha theme. Layout: search bar row | three-panel QSplitter (Com
 - `MirrorCheckWorker` — calls `detect_mirror()` at startup and on ⟳ click; emits `mirror_found(active_url, all_mirrors)` or `mirror_failed()`
 
 **Critical threading rule:** Every `QThread.run()` calls `self._scraper.reset_browser()` as its first line. Qt recycles OS thread IDs across QThread instances, so the old thread-ID tracking was unreliable. `reset_browser()` guarantees a clean Playwright greenlet for each worker.
+
+**Signal disconnect rule:** `_abort_detail_worker()` always disconnects signals (not gated by `isRunning()`), using `sig.disconnect(specific_slot)` rather than `sig.disconnect()` with no args — the no-args form triggers a PySide6 RuntimeWarning when there are no connections.
+
+**Comic detail cache:** `_cache_load(url)` / `_cache_save(url, info, cover_data, issues)` store per-comic JSON under `$XDG_CACHE_HOME/readcomics/comic_cache/{sha256(url)}.json`. Fields: `url`, `info`, `cover_b64` (base64), `issues`, `cached_at`. `_on_comic_selected` checks the cache first; on a hit it calls `_on_info_ready` and `_on_issues_ready` synchronously with `_skip_cache_save=True` and skips launching a worker entirely.
+
+**Tooltip system:** `_set_item_tooltip(item, comic)` checks cache first; if cached, calls `_update_item_tooltip` with full info + issue count. Otherwise builds the tooltip from `status_hint`, `publication_hint`, `summary_hint` extracted from the search page. `_update_item_tooltip(item, title, info, n_issues)` renders HTML with status, year, genres, issue count.
 
 **Logging:** `_setup_logging(verbose)` writes to `$XDG_STATE_HOME/readcomics/readcomics.log` (always) and optionally stderr. XDG path is writable even from a read-only AppImage mount.
 
@@ -88,8 +94,8 @@ Search → pick comic → pick issues → download loop. Registers `atexit` and 
 **Module-level:**
 ```python
 KNOWN_MIRRORS = [
-    "https://readcomiconline.li",
     "https://rcostation.xyz",
+    "https://readcomiconline.li",
 ]
 ```
 
@@ -111,6 +117,14 @@ _http                                                # httpx.Client (thread-safe
 **`_session_ctx` property:** Returns one `BrowserContext` per thread so cookies/session persist across homepage → comic detail → issues page within a single worker.
 
 **`reset_browser()`:** Tears down `_ctx`, `_browser`, `_playwright`, resets all tid flags. Called at the top of every `QThread.run()`.
+
+**`search()` tooltip extraction:** The site stores rich hover-tooltip data as the `title` attribute of `<div class="item">` elements. The JS walks up to the `.item` container, parses the `title` HTML via a temp DOM element, and extracts `tooltipTitle` (full untruncated name), `tooltipStatus`, `tooltipPublication`, and `tooltipSummary`. These are returned as `status_hint`, `publication_hint`, `summary_hint` in the search result dict. The `span.title` inside `<a>` is sometimes truncated; the tooltip title is always full.
+
+**Search result dict:**
+```python
+{"title": str, "url": str, "thumbnail": str,
+ "status_hint": str, "publication_hint": str, "summary_hint": str}
+```
 
 **`get_comic_info` year field:** Matches `"year of release"`, `"publication"`, and `"publication date"` (lowercased label text) — the site uses all three across different comic pages.
 
@@ -149,9 +163,10 @@ Applied to URL-derived `comic_name` (URL path part 2) and `safe_title` (issue ti
 
 ## Key data shapes
 
-- Search result: `{"title": str, "url": str, "thumbnail": str}`
+- Search result: `{"title": str, "url": str, "thumbnail": str, "status_hint": str, "publication_hint": str, "summary_hint": str}`
 - Comic info: `{"cover": str, "summary": str, "genres": str, "status": str, "year": str, "publisher": str}`
 - Issue: `{"title": str, "url": str}`
+- Cache entry: `{"url": str, "info": dict, "cover_b64": str, "issues": list, "cached_at": float}`
 - Download layout: `<output_dir>/<_safe_dirname(comic-slug)>/<_safe_dirname(issue-title)>/<001.jpg …>`
 - CBZ = Python `zipfile` renamed to `.cbz`; CBR = `rar` binary required
 

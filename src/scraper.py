@@ -181,20 +181,49 @@ class ComicScraper:
                 "a[href*='/Comic/']",
                 """els => els.map(e => {
                     const img = e.querySelector('img');
-                    // Collect every plausible title source and keep the longest one,
-                    // since the hover tooltip is usually the most complete string.
+                    // The site stores the hover tooltip on the parent .item div as a
+                    // title attribute containing HTML:
+                    //   <p class="title">Full Name</p>
+                    //   <p><strong>Status: </strong>Ongoing</p>
+                    //   <p><strong>Publication: </strong>...</p>
+                    //   <p class="description">Summary text...</p>
+                    const container = e.closest('.item') || e.parentElement;
+                    let tooltipTitle = '', tooltipStatus = '', tooltipPublication = '', tooltipSummary = '';
+                    if (container) {
+                        const tooltipHtml = container.getAttribute('title');
+                        if (tooltipHtml) {
+                            const tmp = document.createElement('div');
+                            tmp.innerHTML = tooltipHtml;
+                            const titleEl = tmp.querySelector('.title');
+                            if (titleEl) tooltipTitle = titleEl.textContent.trim();
+                            for (const p of tmp.querySelectorAll('p')) {
+                                const strong = p.querySelector('strong');
+                                if (strong) {
+                                    const label = strong.textContent.replace(':', '').trim().toLowerCase();
+                                    const val = p.textContent.replace(strong.textContent, '').trim();
+                                    if (label === 'status') tooltipStatus = val;
+                                    if (label === 'publication') tooltipPublication = val;
+                                } else if (p.classList.contains('description')) {
+                                    tooltipSummary = p.textContent.trim();
+                                }
+                            }
+                        }
+                    }
+                    // Prefer the tooltip title (always full); fall back to span.title then textContent.
                     const candidates = [
-                        e.getAttribute('title'),
+                        tooltipTitle,
                         img && img.getAttribute('alt'),
-                        e.querySelector('p, span, h4, h3, .title, .name') &&
-                            e.querySelector('p, span, h4, h3, .title, .name').textContent,
+                        e.querySelector('span.title') && e.querySelector('span.title').textContent,
                         e.textContent,
                     ].map(s => (s || '').trim()).filter(Boolean);
                     const text = candidates.reduce((a, b) => b.length > a.length ? b : a, '');
                     return {
                         href: (new URL(e.getAttribute('href') || e.href, document.baseURI)).pathname,
                         text: text,
-                        thumb: img ? img.src : ''
+                        thumb: img ? img.src : '',
+                        status: tooltipStatus,
+                        publication: tooltipPublication,
+                        summary: tooltipSummary,
                     };
                 })""",
             )
@@ -221,7 +250,14 @@ class ComicScraper:
                 thumb = item.get("thumb", "")
                 if thumb and not thumb.startswith("http"):
                     thumb = urljoin(self.base_url, thumb)
-                results.append({"title": title, "url": link, "thumbnail": thumb})
+                results.append({
+                    "title": title,
+                    "url": link,
+                    "thumbnail": thumb,
+                    "status_hint": item.get("status", ""),
+                    "publication_hint": item.get("publication", ""),
+                    "summary_hint": item.get("summary", ""),
+                })
 
             return results
         finally:
