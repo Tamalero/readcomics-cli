@@ -249,24 +249,29 @@ class SearchWorker(QThread):
 
 
 class ComicDetailWorker(QThread):
-    """Loads comic metadata + cover image, then the issues list, in one thread."""
+    """Loads comic metadata + cover image, then the issues list, in one thread.
+
+    Uses its own ComicScraper instance so that rapidly switching comics
+    (which creates a new worker) cannot reset the browser mid-execution of
+    a still-running old worker.
+    """
     info_ready = Signal(dict, bytes)   # info dict, raw cover image bytes
     issues_ready = Signal(list)
     error = Signal(str)
 
-    def __init__(self, scraper: ComicScraper, comic: dict):
+    def __init__(self, comic: dict, headless: bool = True):
         super().__init__()
-        self._scraper = scraper
         self._comic = comic
+        self._headless = headless
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
-        self._scraper.reset_browser()
+        scraper = ComicScraper(headless=self._headless)
         try:
-            info = self._scraper.get_comic_info(self._comic["url"])
+            info = scraper.get_comic_info(self._comic["url"])
             if self._cancelled:
                 return
 
@@ -274,7 +279,7 @@ class ComicDetailWorker(QThread):
             cover_url = info.get("cover") or self._comic.get("thumbnail", "")
             if cover_url:
                 try:
-                    resp = self._scraper._http.get(cover_url, timeout=10)
+                    resp = scraper._http.get(cover_url, timeout=10)
                     resp.raise_for_status()
                     cover_data = resp.content
                 except Exception:
@@ -283,13 +288,18 @@ class ComicDetailWorker(QThread):
             if not self._cancelled:
                 self.info_ready.emit(info, cover_data)
 
-            issues = self._scraper.get_issues(self._comic["url"])
+            if self._cancelled:
+                return
+
+            issues = scraper.get_issues(self._comic["url"])
             if not self._cancelled:
                 self.issues_ready.emit(issues)
         except Exception as exc:
             logger.exception("Comic detail failed for %s", self._comic.get("url"))
             if not self._cancelled:
                 self.error.emit(str(exc))
+        finally:
+            scraper.close()
 
 
 class DownloadWorker(QThread):
@@ -532,6 +542,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 650)
         self.resize(1280, 800)
 
+        self._headless = headless
         self._scraper = ComicScraper(headless=headless)
         self._search_worker: SearchWorker | None = None
         self._detail_worker: ComicDetailWorker | None = None
@@ -781,7 +792,7 @@ class MainWindow(QMainWindow):
         self._current_comic = comic
         self.statusBar().showMessage(f"Loading: {comic['title']}…")
 
-        worker = ComicDetailWorker(self._scraper, comic)
+        worker = ComicDetailWorker(comic, headless=self._headless)
         self._detail_worker = worker
         worker.info_ready.connect(self._on_info_ready)
         worker.issues_ready.connect(self._on_issues_ready)
