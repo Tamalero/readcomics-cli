@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 import argparse
-import atexit
+import re
 import signal
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
+
+
+def _safe_dirname(name: str) -> str:
+    """Strip path-traversal sequences and filesystem-unsafe chars from a directory name."""
+    name = re.sub(r'[/\\:*?"<>|]', '_', name)
+    name = re.sub(r'\.\.+', '.', name)
+    name = name.strip('. ')
+    return name or "Unknown"
 
 from rich.console import Console
 from rich.table import Table
@@ -308,15 +316,14 @@ def _download_with_progress(scraper, issue, image_urls, output_dir, issue_label)
     parsed = urlparse(issue_url)
     path_parts = parsed.path.rstrip("/").split("/")
 
-    comic_title = path_parts[2] if len(path_parts) > 2 else "Unknown"
-    comic_title = comic_title.replace("-", " ").replace("_", " ")
-    comic_title = " ".join(comic_title.split())
+    raw_comic_title = path_parts[2] if len(path_parts) > 2 else "Unknown"
+    raw_comic_title = raw_comic_title.replace("-", " ").replace("_", " ")
+    comic_title = _safe_dirname(" ".join(raw_comic_title.split()))
 
-    issue_title = issue["title"].replace("/", "_").replace("\\", "_")
+    issue_title = _safe_dirname(issue["title"])
     issue_dir = os.path.join(output_dir, comic_title, issue_title)
     os.makedirs(issue_dir, exist_ok=True)
 
-    total = len(image_urls)
     tasks = []
     for page_num, img_url in enumerate(image_urls, start=1):
         if not img_url:
@@ -325,6 +332,9 @@ def _download_with_progress(scraper, issue, image_urls, output_dir, issue_label)
         filename = f"{page_num:03d}{ext}"
         filepath = os.path.join(issue_dir, filename)
         tasks.append((page_num, img_url, filepath))
+
+    total = len(tasks)
+    failed = 0
 
     with Progress(
         SpinnerColumn(),
@@ -343,8 +353,14 @@ def _download_with_progress(scraper, issue, image_urls, output_dir, issue_label)
                 for page_num, img_url, filepath in tasks
             }
             for future in as_completed(future_to_page):
-                future.result()  # propagate exceptions
+                try:
+                    future.result()
+                except Exception:
+                    failed += 1
                 progress.advance(task)
+
+    if failed:
+        console.print(f"  [yellow]Warning: {failed}/{total} page(s) failed to download.[/yellow]")
 
     return issue_dir
 
@@ -379,7 +395,6 @@ def main():
     # Register cleanup handlers before anything is allocated
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
-    atexit.register(_cleanup)
 
     console.print(BANNER)
 

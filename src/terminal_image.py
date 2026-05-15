@@ -28,10 +28,10 @@ def _supports_color() -> bool:
     if colorterm in ("truecolor", "24bit"):
         return True
     term = os.environ.get("TERM", "").lower()
-    if "256color" in term or "kitty" in term:
+    if "kitty" in term:
         return True
-    # Assume most modern terminals support it
-    return True
+    # 256color does not imply 24-bit support; require explicit confirmation
+    return False
 
 
 def render_image(

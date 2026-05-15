@@ -2,3 +2,4 @@ httpx
 playwright
 rich
 Pillow
+PySide6

@@ -21,3 +21,13 @@ downloads/
 !downloads/README.md
 
 .env
+
+# Runtime artefacts — not source code
+firefox-profile/
+readcomics.log
+ublock_origin.xpi
+
+# AppImage build output
+*.AppImage
+*.AppDir/
+appimage-build/
