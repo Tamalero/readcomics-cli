@@ -1,31 +1,38 @@
 # ReadComics
 
-Search, browse, and download comics from [rcostation.xyz](https://rcostation.xyz) with a desktop GUI or interactive terminal.
+A desktop GUI for browsing and downloading comics from [rcostation.xyz](https://rcostation.xyz).
 
-Features a dark Catppuccin Mocha themed GUI, cover art previews, CBZ/CBR packaging, concurrent or rate-limited downloads, and automatic update notifications.
+Automatic mirror detection, cover art previews, CBZ/CBR packaging, and a dark Catppuccin Mocha theme.
+
+---
 
 ## Screenshots
 
-![ReadComics — search results and comic details](docs/screenshot-results.png)
+![Search results with comic details](docs/screenshot-results.png)
 
-![ReadComics — main window](docs/screenshot-empty.png)
+![Main window](docs/screenshot-empty.png)
+
+---
 
 ## Install
 
-### AppImage (Linux, no setup required)
+### AppImage — no setup required (Linux)
 
-Download the latest `ReadComics-x86_64.AppImage` from the [Releases](https://github.com/Tamalero/readcomics-cli/releases) page, make it executable, and run it:
+1. Download `ReadComics-x86_64.AppImage` from the [Releases](https://github.com/Tamalero/readcomics-cli/releases) page.
+2. Make it executable and run:
 
 ```sh
 chmod +x ReadComics-x86_64.AppImage
 ./ReadComics-x86_64.AppImage
 ```
 
-Supports delta updates via [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) using the bundled zsync metadata.
+Everything is bundled: Python 3.12, PySide6, Playwright, and Firefox. No installation needed.
 
-### From source
+> **Delta updates** — if you already have a previous version you can use [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) with the `.zsync` file from the release to download only the changed bytes.
 
-Requires Python 3.10+ and [fish shell](https://fishshell.com/).
+---
+
+### From source (requires Python 3.10+ and [fish shell](https://fishshell.com/))
 
 ```sh
 git clone https://github.com/Tamalero/readcomics-cli.git
@@ -33,43 +40,104 @@ cd readcomics-cli
 fish start.fish
 ```
 
-`start.fish` creates a venv, installs dependencies, downloads the Playwright Firefox browser (one-time, ~80 MB), and launches the GUI.
+`start.fish` does everything automatically:
 
-## Usage
+- Creates a Python virtual environment if one does not exist.
+- Installs all dependencies from `requirements.txt`.
+- Downloads the Playwright Firefox browser (one-time, ~80 MB).
+- Launches the GUI.
 
-```sh
-fish start.fish               # GUI (default)
-fish start.fish --verbose     # show debug output and browser logs
-fish start.fish --no-headless # show the Firefox window (scraping debug)
+#### Launcher flags
+
+| Flag | Effect |
+|---|---|
+| `--verbose` / `-v` | Show full pip/playwright output and write debug logs to stderr |
+| `--no-headless` | Show the Firefox browser window (useful for debugging scraping) |
+
+---
+
+## Using the GUI
+
+### 1 — Mirror detection
+
+When the app starts it automatically probes all known mirrors and selects the first one that is actually serving the site (not just reachable — it checks that the search form is present in the response).
+
+- The active mirror is shown in the **Mirror** drop-down in the top bar.
+- Use the drop-down to switch mirrors manually at any time.
+- Click **⟳** to re-probe mirrors (useful if the current mirror stops working mid-session).
+- If the site advertises a backup domain on its homepage, that domain is automatically added to the list.
+
+### 2 — Search
+
+Type a comic title in the search box and press **Search** or hit Enter. Results appear in the **Comics** column on the left.
+
+- Comics whose status is **Ongoing** are highlighted in green.
+
+### 3 — Browse details
+
+Click any comic in the list to load its cover art, metadata, and full issue list:
+
+- **Publisher**, **Status**, **Year**, **Genres**, and a short **Summary** appear in the **Details** column.
+- The **Issues** column on the right lists every available issue, all checked by default.
+
+### 4 — Select issues
+
+Use the **All** / **None** buttons to check or uncheck everything, or tick individual issues manually.
+
+### 5 — Configure download options
+
+| Option | Description |
+|---|---|
+| **Save as** checkbox | When checked, package downloaded images into an archive |
+| **CBZ** | ZIP archive renamed to `.cbz` — works everywhere, no extra software needed |
+| **CBR** | RAR archive — requires the `rar` binary (`sudo pacman -S rar` / `sudo apt install rar`) |
+| **Delay** | Seconds to wait between individual image downloads (0 = fast concurrent mode, > 0 = sequential with ±50 % random jitter to avoid rate-limiting) |
+| **Output** | Directory where comics are saved. Click **Browse…** to pick a folder. |
+
+Downloads are organised as:
+
+```
+<output>/<Comic Title>/<Issue Title>/001.jpg, 002.jpg, …
 ```
 
-1. **Search** — type a comic title and press Search
-2. **Browse** — select a comic to load its cover, metadata, and issue list
-3. **Pick issues** — check individual issues or use Select All / None
-4. **Configure** — choose Folder / CBZ / CBR output, set an optional download delay, and pick an output directory
-5. **Download** — click Download; progress is shown per-issue in the log panel
+CBZ/CBR archives are placed at `<output>/<Comic Title>/<Issue Title>.cbz` and the image folder is removed.
 
-### Download delay
+### 6 — Download
 
-Setting a delay (0.5–30 s) switches from concurrent 6-thread mode to sequential per-image downloads with ±50 % random jitter, which reduces the chance of rate-limiting.
+Click **⬇ Download**. Progress is shown in the bar and the log panel below it. Click **Cancel** to stop mid-download cleanly.
 
-### CLI fallback
+---
 
-A Rich-powered terminal interface is also available:
+## CLI fallback
+
+A Rich-powered terminal interface is also available for headless or scripting use:
 
 ```sh
-python main.py
-python main.py -s "Batman"     # skip the search prompt
-python main.py -o ~/Comics     # custom output directory
+python main.py                        # interactive session
+python main.py -s "Batman"            # skip the search prompt
+python main.py -o ~/Comics            # custom output directory
+python main.py --no-headless          # show the browser window
 ```
+
+---
+
+## Why Firefox?
+
+The site blocks all Chromium-based browsers at the network level (returns 404 on every request). Playwright Firefox is required and is bundled in the AppImage.
+
+---
 
 ## Dependencies
 
-- [Playwright](https://playwright.dev/python/) — headless **Firefox** (required; the site blocks Chromium-based browsers)
-- [PySide6](https://pypi.org/project/PySide6/) — Qt6 GUI framework
-- [httpx](https://www.python-httpx.org/) — HTTP client for image downloads
-- [Rich](https://github.com/Textualize/rich) — terminal tables and progress bars (CLI mode)
-- [Pillow](https://python-pillow.org/) — cover art rendering in the terminal (CLI mode)
+| Package | Purpose |
+|---|---|
+| [PySide6](https://pypi.org/project/PySide6/) | Qt6 GUI framework |
+| [Playwright](https://playwright.dev/python/) | Headless Firefox for pages behind Cloudflare |
+| [httpx](https://www.python-httpx.org/) | HTTP client for image downloads and mirror probing |
+| [Rich](https://github.com/Textualize/rich) | Terminal tables and progress bars (CLI mode) |
+| [Pillow](https://python-pillow.org/) | Cover art rendering in the terminal (CLI mode) |
+
+---
 
 ## License
 
