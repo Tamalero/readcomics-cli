@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 def _safe_dirname(name: str) -> str:
     """Strip path-traversal sequences and filesystem-unsafe chars from a directory name."""
-    name = re.sub(r'[/\\:*?"<>|]', '_', name)
+    name = re.sub(r'\s*:\s*', ' - ', name)        # colon → space-dash-space
+    name = re.sub(r'[/\\*?"<>|]', '_', name)      # replace remaining filesystem-unsafe chars
     name = re.sub(r'\.\.+', '.', name)
     name = name.strip('. ')
     return name or "Unknown"

@@ -36,7 +36,7 @@ There are no tests or linting configuration in this project.
 
 ## Current version
 
-Tracked in `VERSION` file. Read at runtime by `gui.py::_read_version()`. Current: **1.2.0**.
+Tracked in `VERSION` file. Read at runtime by `gui.py::_read_version()`. Current: **1.3.0**.
 
 ## Architecture
 
@@ -58,13 +58,13 @@ Dark Catppuccin Mocha theme. Layout: search bar row | three-panel QSplitter (Com
 **Bottom bar:** `Save as:` QCheckBox + CBZ/CBR QComboBox | `Delay:` QDoubleSpinBox (0–30 s, step 0.5) | Output QLineEdit + Browse | Download / Cancel buttons | QProgressBar | QTextEdit log (read-only, max height 90 px).
 
 **Workers (all `QThread` subclasses):**
-- `SearchWorker` — calls `scraper.search(query)`
-- `ComicDetailWorker` — calls `scraper.get_comic_info()` then `scraper.get_issues()` sequentially; cancellable via `_cancelled` flag + signal disconnect
-- `DownloadWorker` — fetches image URLs then downloads pages; concurrent (`ThreadPoolExecutor(max_workers=6)`) when delay = 0, sequential with `random.uniform(delay×0.5, delay×1.5)` jitter when delay > 0
-- `UpdateCheckWorker` — silently queries GitHub releases API at startup via `urllib.request`; emits `update_available(latest_version, url)` if newer tag found; all exceptions suppressed
+- `SearchWorker` — calls `reset_browser()` then `scraper.search(query)`; shares `self._scraper` with `DownloadWorker`
+- `ComicDetailWorker` — **owns its own `ComicScraper` instance** (created in `run()`, closed in `finally`); does NOT call `reset_browser()`. Calls `get_comic_info()` then `get_issues()` sequentially; two `_cancelled` guards prevent stale signals when the user switches comics rapidly
+- `DownloadWorker` — calls `reset_browser()` then fetches image URLs and downloads pages; concurrent (`ThreadPoolExecutor(max_workers=6)`) when delay = 0, sequential with `random.uniform(delay×0.5, delay×1.5)` jitter when delay > 0
+- `UpdateCheckWorker` — silently queries GitHub releases API at startup via `urllib.request`; emits `update_available(latest_version, url)` if newer tag found; all exceptions suppressed; no Playwright, no shared scraper
 - `MirrorCheckWorker` — calls `detect_mirror()` at startup and on ⟳ click; emits `mirror_found(active_url, all_mirrors)` or `mirror_failed()`
 
-**Critical threading rule:** Every `QThread.run()` calls `self._scraper.reset_browser()` as its first line. Qt recycles OS thread IDs across QThread instances, so the old thread-ID tracking was unreliable. `reset_browser()` guarantees a clean Playwright greenlet for each worker.
+**Critical threading rule:** `SearchWorker` and `DownloadWorker` share `self._scraper` and call `reset_browser()` at the start of `run()` — Qt recycles OS thread IDs, so `reset_browser()` guarantees a clean Playwright greenlet. `ComicDetailWorker` is exempt: it creates a fresh `ComicScraper` per run so that rapidly switching comics (Worker B starting while Worker A is still running) never clobbers the shared browser state.
 
 **Signal disconnect rule:** `_abort_detail_worker()` always disconnects signals (not gated by `isRunning()`), using `sig.disconnect(specific_slot)` rather than `sig.disconnect()` with no args — the no-args form triggers a PySide6 RuntimeWarning when there are no connections.
 
@@ -100,8 +100,8 @@ KNOWN_MIRRORS = [
 ```
 
 **`detect_mirror(candidates=None, timeout=8)`** — standalone function (not a method). Creates its own `httpx.Client`. For each candidate URL:
-1. GET homepage; skip if status ≥ 400.
-2. Skip if `id="keyword"` absent from response body — a domain can return HTTP 200 while serving 404 on all comic paths (`readcomiconline.li` was exactly this case).
+1. GET homepage with browser-like headers; skip if status ≥ 400.
+2. Accept if `id="keyword"` present (real page loaded) **OR** `/cdn-cgi/` present (Cloudflare challenge — Playwright will solve it). Reject if neither. (A domain can return HTTP 200 while serving 404 on all comic paths; `readcomiconline.li` was exactly this case.)
 3. On first passing candidate, regex-scan HTML for `Backup domain … <a href="...">` to discover additional mirrors.
 Returns `(working_url, extra_mirrors)` or `(None, [])`.
 
@@ -148,12 +148,13 @@ Renders images as ANSI half-block characters (▄) with 24-bit truecolor. Not us
 **`_safe_dirname(name)`** (in both `gui.py` and `main.py`):
 ```python
 def _safe_dirname(name: str) -> str:
-    name = re.sub(r'[/\\:*?"<>|]', '_', name)
+    name = re.sub(r'\s*:\s*', ' - ', name)   # colon → " - " (e.g. "Title: Sub" → "Title - Sub")
+    name = re.sub(r'[/\\*?"<>|]', '_', name) # remaining unsafe chars → underscore
     name = re.sub(r'\.\.+', '.', name)
     name = name.strip('. ')
     return name or "Unknown"
 ```
-Applied to URL-derived `comic_name` (URL path part 2) and `safe_title` (issue title) before using them as directory names.
+Applied to publisher, comic title, and issue title before using them as directory/file names.
 
 **HTML escaping:** All scraped values rendered in `QLabel` rich text go through `html.escape()`.
 
@@ -167,7 +168,7 @@ Applied to URL-derived `comic_name` (URL path part 2) and `safe_title` (issue ti
 - Comic info: `{"cover": str, "summary": str, "genres": str, "status": str, "year": str, "publisher": str}`
 - Issue: `{"title": str, "url": str}`
 - Cache entry: `{"url": str, "info": dict, "cover_b64": str, "issues": list, "cached_at": float}`
-- Download layout: `<output_dir>/<_safe_dirname(comic-slug)>/<_safe_dirname(issue-title)>/<001.jpg …>`
+- Download layout: `<output_dir>/<publisher>/<comic-title>/<issue-title>/` (folder) or `…/<issue-title>.cbz/.cbr` (archive). Publisher and comic title come from the GUI's `_current_info` / `_current_comic`; fallback to URL slug when absent.
 - CBZ = Python `zipfile` renamed to `.cbz`; CBR = `rar` binary required
 
 ---

@@ -312,13 +312,16 @@ class DownloadWorker(QThread):
     log_message = Signal(str)
     finished_all = Signal()
 
-    def __init__(self, scraper: ComicScraper, issues: list, output_dir: str, fmt: str, delay: float = 0.0):
+    def __init__(self, scraper: ComicScraper, issues: list, output_dir: str, fmt: str,
+                 delay: float = 0.0, publisher: str = "", comic_title: str = ""):
         super().__init__()
         self._scraper = scraper
         self._issues = issues
         self._output_dir = output_dir
         self._fmt = fmt          # "folder" | "cbz" | "cbr"
         self._delay = delay      # seconds between image downloads (0 = concurrent, no delay)
+        self._publisher = publisher
+        self._comic_title = comic_title
         self._cancelled = False
 
     def cancel(self):
@@ -338,6 +341,31 @@ class DownloadWorker(QThread):
                 break
 
             title = issue["title"]
+
+            # Build path: <output>/<publisher>/<comic>/<issue>
+            # Publisher and comic title come from the GUI; fall back to URL slug if absent.
+            parsed = urlparse(issue["url"])
+            parts = parsed.path.rstrip("/").split("/")
+            raw_slug = (parts[2] if len(parts) > 2 else "Unknown").replace("-", " ").replace("_", " ")
+            publisher_dir = _safe_dirname(self._publisher) if self._publisher else "Unknown"
+            comic_dir = _safe_dirname(self._comic_title) if self._comic_title else _safe_dirname(raw_slug)
+            safe_title = _safe_dirname(title)
+            issue_dir = os.path.join(self._output_dir, publisher_dir, comic_dir, safe_title)
+
+            # Skip without a network request if the issue was already downloaded.
+            already_done = False
+            if self._fmt == "cbz":
+                already_done = os.path.isfile(issue_dir + ".cbz")
+            elif self._fmt == "cbr":
+                already_done = os.path.isfile(issue_dir + ".cbr")
+            else:
+                already_done = os.path.isdir(issue_dir) and bool(_image_files(issue_dir))
+            if already_done:
+                existing = issue_dir + (".cbz" if self._fmt == "cbz" else ".cbr" if self._fmt == "cbr" else "")
+                self.log_message.emit(f"Skipping (already exists): {title}")
+                self.issue_done.emit(title, existing)
+                continue
+
             self.log_message.emit(f"Fetching page list: {title}")
 
             try:
@@ -351,14 +379,6 @@ class DownloadWorker(QThread):
                 self.issue_failed.emit(title, "no pages found")
                 continue
 
-            # Build issue directory path from URL slug — sanitize both components
-            # to prevent path traversal via crafted server responses.
-            parsed = urlparse(issue["url"])
-            parts = parsed.path.rstrip("/").split("/")
-            raw_comic_name = (parts[2] if len(parts) > 2 else "Unknown").replace("-", " ").replace("_", " ")
-            comic_name = _safe_dirname(raw_comic_name)
-            safe_title = _safe_dirname(title)
-            issue_dir = os.path.join(self._output_dir, comic_name, safe_title)
             os.makedirs(issue_dir, exist_ok=True)
 
             tasks = []
@@ -499,9 +519,10 @@ class MirrorCheckWorker(QThread):
 
 def _safe_dirname(name: str) -> str:
     """Strip path-traversal sequences and filesystem-unsafe chars from a directory name."""
-    name = re.sub(r'[/\\:*?"<>|]', '_', name)   # replace filesystem-unsafe chars
-    name = re.sub(r'\.\.+', '.', name)            # collapse .. sequences
-    name = name.strip('. ')                        # strip leading/trailing dots/spaces
+    name = re.sub(r'\s*:\s*', ' - ', name)        # colon → space-dash-space (e.g. "Title: Sub" → "Title - Sub")
+    name = re.sub(r'[/\\*?"<>|]', '_', name)      # replace remaining filesystem-unsafe chars
+    name = re.sub(r'\.\.+', '.', name)             # collapse .. sequences
+    name = name.strip('. ')                         # strip leading/trailing dots/spaces
     return name or "Unknown"
 
 
@@ -594,6 +615,7 @@ class MainWindow(QMainWindow):
         self._mirror_worker: MirrorCheckWorker | None = None
         self._comics: list = []
         self._current_comic: dict | None = None
+        self._current_info: dict | None = None
         self._pending_info: dict | None = None
         self._pending_cover: bytes = b""
         self._pending_comic_url: str = ""
@@ -970,6 +992,7 @@ class MainWindow(QMainWindow):
             lines.append(f"<br><span style='color:#a6adc8;font-size:12px;'>{html.escape(info['summary'])}</span>")
         self.info_label.setText("<br>".join(lines))
         self.statusBar().showMessage(f"Loading issues for {title}…")
+        self._current_info = info
         self._pending_info = info
         self._pending_cover = cover_data
         self._pending_comic_url = self._current_comic.get("url", "")
@@ -1052,7 +1075,12 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("Starting…")
         self._set_ui_downloading(True)
 
-        self._download_worker = DownloadWorker(self._scraper, selected, output_dir, fmt, delay)
+        publisher = (self._current_info or {}).get("publisher", "")
+        comic_title = (self._current_comic or {}).get("title", "")
+        self._download_worker = DownloadWorker(
+            self._scraper, selected, output_dir, fmt, delay,
+            publisher=publisher, comic_title=comic_title,
+        )
         self._download_worker.progress_update.connect(self._on_progress)
         self._download_worker.issue_done.connect(
             lambda t, p: self._append_log(f"✓  {t}  →  {p}")
