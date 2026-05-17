@@ -40,3 +40,4 @@ dist/
 build/
 *.spec.bak
 docs/icon.ico
+!build-icon.py

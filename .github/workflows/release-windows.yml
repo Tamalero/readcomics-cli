@@ -1,0 +1,60 @@
+name: Build & attach Windows release
+
+# Runs automatically when a release is published on GitHub.
+# Builds the self-contained Windows bundle and uploads ReadComics-Windows.zip
+# to the release so users can download it from the Releases page.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write   # needed to upload assets to the release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python packages
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install Playwright Firefox
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "win-build\browsers" | Out-Null
+          playwright install firefox
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: win-build\browsers
+
+      - name: Generate icon
+        run: python build-icon.py
+
+      - name: Build with PyInstaller
+        run: pyinstaller readcomics.spec --noconfirm
+
+      - name: Copy browsers into dist
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse "win-build\browsers" "dist\ReadComics\browsers"
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\ReadComics\*" -DestinationPath "ReadComics-Windows.zip"
+
+      - name: Upload zip to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ReadComics-Windows.zip
