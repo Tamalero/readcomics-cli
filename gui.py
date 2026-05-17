@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """ReadComics GUI — PySide6 frontend for browsing and downloading comics."""
 
+# When running as a PyInstaller bundle, point Playwright at the browsers folder
+# that sits next to the EXE. Must be set before playwright is imported.
+import os as _os, sys as _sys
+if getattr(_sys, 'frozen', False):
+    _os.environ.setdefault(
+        'PLAYWRIGHT_BROWSERS_PATH',
+        _os.path.join(_os.path.dirname(_sys.executable), 'browsers'),
+    )
+
 import argparse
 import base64
 import hashlib

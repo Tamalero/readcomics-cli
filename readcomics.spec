@@ -1,0 +1,106 @@
+# readcomics.spec — PyInstaller build spec for ReadComics (Windows one-dir bundle)
+#
+# Usage (from the repo root, inside the venv):
+#   pyinstaller readcomics.spec --noconfirm
+#
+# The build-windows.ps1 script runs this automatically and then copies the
+# Playwright Firefox browsers into dist\ReadComics\browsers\.
+
+import os
+from PyInstaller.utils.hooks import collect_data_files
+
+block_cipher = None
+
+# ── Playwright driver ─────────────────────────────────────────────────────────
+# Playwright Python ships a self-contained Node.js runtime + driver binary
+# inside its package (playwright/driver/).  PyInstaller won't find it
+# automatically, so we bundle it explicitly as data.
+import playwright as _pw
+_pw_driver_src = os.path.join(os.path.dirname(_pw.__file__), 'driver')
+_pw_datas = [(_pw_driver_src, 'playwright/driver')]
+
+# ── Analysis ──────────────────────────────────────────────────────────────────
+a = Analysis(
+    ['gui.py'],
+    pathex=['.'],
+    binaries=[],
+    datas=[
+        ('VERSION', '.'),
+        ('src',     'src'),
+        *_pw_datas,
+        *collect_data_files('PySide6'),
+        *collect_data_files('certifi'),
+    ],
+    hiddenimports=[
+        # Playwright
+        'playwright.sync_api',
+        'playwright._impl._browser',
+        'playwright._impl._browser_context',
+        'playwright._impl._browser_type',
+        'playwright._impl._page',
+        'playwright._impl._driver',
+        'playwright._impl._transport',
+        # httpx / httpcore
+        'httpx',
+        'httpx._transports.default',
+        'httpcore',
+        'anyio',
+        'anyio._backends._asyncio',
+        'anyio._backends._trio',
+        'sniffio',
+        # PySide6
+        'PySide6.QtCore',
+        'PySide6.QtGui',
+        'PySide6.QtWidgets',
+        'PySide6.QtNetwork',
+        # Project
+        'src.scraper',
+        # stdlib that PyInstaller sometimes misses
+        'zipfile',
+        'hashlib',
+        'base64',
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[
+        'tkinter', 'matplotlib', 'numpy', 'scipy',
+        'unittest', 'test', 'distutils',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='ReadComics',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,          # disabled — UPX triggers antivirus false positives
+    console=False,      # no black terminal window
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon='docs\\icon.ico',
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='ReadComics',
+)

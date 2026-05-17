@@ -29,5 +29,14 @@ ublock_origin.xpi
 
 # AppImage build output
 *.AppImage
+*.AppImage.zsync
 *.AppDir/
 appimage-build/
+
+# Windows build output
+venv-win/
+win-build/
+dist/
+build/
+*.spec.bak
+docs/icon.ico
